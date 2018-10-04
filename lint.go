@@ -16,6 +16,7 @@ import (
 	"go/printer"
 	"go/token"
 	"go/types"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -31,6 +32,7 @@ const styleGuideBase = "https://golang.org/wiki/CodeReviewComments"
 
 // A Linter lints Go source code.
 type Linter struct {
+	Mode []string
 }
 
 // Problem represents a problem in some source code.
@@ -112,7 +114,7 @@ func (l *Linter) LintFiles(files map[string][]byte) ([]Problem, error) {
 	if len(pkg.files) == 0 {
 		return nil, nil
 	}
-	return pkg.lint(), nil
+	return pkg.lint(l.Mode), nil
 }
 
 var (
@@ -149,7 +151,7 @@ type pkg struct {
 	problems []Problem
 }
 
-func (p *pkg) lint() []Problem {
+func (p *pkg) lint(mode []string) []Problem {
 	if err := p.typeCheck(); err != nil {
 		/* TODO(dsymonds): Consider reporting these errors when golint operates on entire packages.
 		if e, ok := err.(types.Error); ok {
@@ -173,7 +175,7 @@ func (p *pkg) lint() []Problem {
 	p.main = p.isMain()
 
 	for _, f := range p.files {
-		f.lint()
+		f.lint(mode)
 	}
 
 	sort.Sort(byPosition(p.problems))
@@ -192,25 +194,36 @@ type file struct {
 
 func (f *file) isTest() bool { return strings.HasSuffix(f.filename, "_test.go") }
 
-func (f *file) lint() {
-	f.lintPackageComment()
-	f.lintImports()
-	f.lintBlankImports()
-	f.lintExported()
-	f.lintNames()
-	f.lintVarDecls()
-	f.lintElses()
-	f.lintRanges()
-	f.lintErrorf()
-	f.lintErrors()
-	f.lintErrorStrings()
-	f.lintReceiverNames()
-	f.lintIncDec()
-	f.lintErrorReturn()
-	f.lintUnexportedReturn()
-	f.lintTimeNames()
-	f.lintContextKeyTypes()
-	f.lintContextArgs()
+func (f *file) lint(mode []string) {
+	if len(mode) == 0 {
+		f.lintPackageComment()
+		f.lintImports()
+		f.lintBlankImports()
+		f.lintExported()
+		f.lintNames()
+		f.lintVarDecls()
+		f.lintElses()
+		f.lintRanges()
+		f.lintErrorf()
+		f.lintErrors()
+		f.lintErrorStrings()
+		f.lintReceiverNames()
+		f.lintIncDec()
+		f.lintErrorReturn()
+		f.lintUnexportedReturn()
+		f.lintTimeNames()
+		f.lintContextKeyTypes()
+		f.lintContextArgs()
+	} else {
+		for _, m := range mode {
+			switch m {
+			case "naming":
+				f.lintNames()
+			default:
+				fmt.Fprintf(os.Stderr, "Selective linting mode: %s not supported yet", m)
+			}
+		}
+	}
 }
 
 type link string
@@ -253,6 +266,10 @@ argLoop:
 	}
 
 	problem.Text = fmt.Sprintf(args[0].(string), args[1:]...)
+
+	if problem.Category == "naming" {
+		problem.ReplacementLine = args[len(args)-1].(string)
+	}
 
 	p.problems = append(p.problems, problem)
 	return &p.problems[len(p.problems)-1]
@@ -561,7 +578,8 @@ func (f *file) lintNames() {
 
 		// Handle two common styles from other languages that don't belong in Go.
 		if len(id.Name) >= 5 && allCapsRE.MatchString(id.Name) && strings.Contains(id.Name, "_") {
-			f.errorf(id, 0.8, link(styleGuideBase+"#mixed-caps"), category("naming"), "don't use ALL_CAPS in Go names; use CamelCase")
+			should := lintName(string(id.Name[0]) + strings.ToLower(id.Name[1:]))
+			f.errorf(id, 0.8, link(styleGuideBase+"#mixed-caps"), category("naming"), "don't use ALL_CAPS in Go names; %s %s should be %s", thing, id.Name, should)
 			return
 		}
 		if len(id.Name) > 2 && id.Name[0] == 'k' && id.Name[1] >= 'A' && id.Name[1] <= 'Z' {

@@ -12,18 +12,37 @@ import (
 	"fmt"
 	"go/build"
 	"io/ioutil"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"golang.org/x/lint"
+	"golang.org/x/tools/refactor/rename"
 )
 
+type lintMode []string
+
+func (l *lintMode) String() string {
+	return ""
+}
+
+func (l *lintMode) Set(v string) error {
+	*l = append(*l, v)
+	return nil
+}
+
 var (
+	mode          lintMode
 	minConfidence = flag.Float64("min_confidence", 0.8, "minimum confidence of a problem to print it")
 	setExitStatus = flag.Bool("set_exit_status", false, "set exit status to 1 if any issues are found")
+	fixNames      = flag.Bool("fix_names", false, "fix name problems by applying linter suggestions")
 	suggestions   int
 )
+
+func init() {
+	flag.Var(&mode, "only", "limit linting to only these type of errors. e.g. 'names'")
+}
 
 func usage() {
 	fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
@@ -99,7 +118,26 @@ func exists(filename string) bool {
 	return err == nil
 }
 
+type blacklist []lint.Problem
+
+func (b *blacklist) blacklisted(p lint.Problem) bool {
+	var st bool
+
+	for _, bp := range *b {
+		if bp.Category == p.Category && bp.Position.Filename == p.Position.Filename &&
+			bp.Position.Line == p.Position.Line && bp.Position.Offset == p.Position.Offset &&
+			bp.Position.Column == p.Position.Column {
+
+			st = true
+			break
+		}
+	}
+	return st
+}
+
 func lintFiles(filenames ...string) {
+	var bl blacklist
+again:
 	files := make(map[string][]byte)
 	for _, filename := range filenames {
 		src, err := ioutil.ReadFile(filename)
@@ -110,7 +148,7 @@ func lintFiles(filenames ...string) {
 		files[filename] = src
 	}
 
-	l := new(lint.Linter)
+	l := lint.Linter{Mode: mode}
 	ps, err := l.LintFiles(files)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
@@ -120,6 +158,24 @@ func lintFiles(filenames ...string) {
 		if p.Confidence >= *minConfidence {
 			fmt.Printf("%v: %s\n", p.Position, p.Text)
 			suggestions++
+		}
+
+		if *fixNames && p.Category == "naming" {
+			log.Printf("[INFO] trying to fix naming problem: %+v", p)
+			offset := fmt.Sprintf("%s:#%d", p.Position.Filename, p.Position.Offset)
+			if !bl.blacklisted(p) {
+				upds, err := rename.Main(&build.Default, offset, "", p.ReplacementLine)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "fix-names: error renaming: %+v", err)
+					bl = append(bl, p)
+				}
+				if len(upds) > 0 {
+					fmt.Fprintf(os.Stderr, "fix-names: files updated: %+v", upds)
+					goto again
+				}
+			} else {
+				fmt.Fprintf(os.Stderr, "Problem is blacklisted, skipping: %+v", p)
+			}
 		}
 	}
 }
@@ -155,5 +211,7 @@ func lintImportedPackage(pkg *build.Package, err error) {
 	}
 	// TODO(dsymonds): Do foo_test too (pkg.XTestGoFiles)
 
-	lintFiles(files...)
+	for _, f := range files {
+		lintFiles(f)
+	}
 }
